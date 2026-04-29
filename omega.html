@@ -265,15 +265,10 @@
     font-family: 'Orbitron', sans-serif;
     font-size: 56px;
     font-weight: 900;
-    color: #ff2200;
-    text-shadow: 0 0 30px #ff2200, 0 0 80px #ff4400;
+    color: #000;
+    text-shadow: none;
     letter-spacing: 8px;
-    animation: pulse-red 0.8s ease-in-out infinite;
-  }
-
-  @keyframes pulse-red {
-    0%, 100% { text-shadow: 0 0 30px #ff2200, 0 0 80px #ff4400; }
-    50% { text-shadow: 0 0 60px #ff4400, 0 0 120px #ff6600; }
+    transition: none;
   }
 
   #gameover-hint {
@@ -429,6 +424,425 @@ const WALL_FLASH_COLOR = '#00ff88';
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
+// ─── AUDIO ENGINE ────────────────────────────────────────────────────────────
+let audioCtx = null;
+
+function getAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+// ── Thrust noise ──────────────────────────────────────────────────────────────
+let thrustNoise = null;
+
+function startThrust() {
+  if (thrustNoise) return;
+  const ac = getAudio();
+  const bufSize = ac.sampleRate * 2;
+  const buf = ac.createBuffer(1, bufSize, ac.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+
+  const src = ac.createBufferSource();
+  src.buffer = buf;
+  src.loop = true;
+
+  const bandpass = ac.createBiquadFilter();
+  bandpass.type = 'bandpass';
+  bandpass.frequency.value = 1200;
+  bandpass.Q.value = 0.8;
+
+  const gain = ac.createGain();
+  gain.gain.value = 0.18;
+
+  src.connect(bandpass);
+  bandpass.connect(gain);
+  gain.connect(ac.destination);
+  src.start();
+
+  thrustNoise = { src, gain };
+}
+
+function stopThrust() {
+  if (!thrustNoise) return;
+  thrustNoise.gain.gain.setTargetAtTime(0, getAudio().currentTime, 0.05);
+  const s = thrustNoise.src;
+  setTimeout(() => { try { s.stop(); } catch(e){} }, 200);
+  thrustNoise = null;
+}
+
+// ── Pew (shoot) ───────────────────────────────────────────────────────────────
+function playPew() {
+  const ac = getAudio();
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(900, ac.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(80, ac.currentTime + 0.12);
+
+  gain.gain.setValueAtTime(0.25, ac.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.13);
+
+  osc.connect(gain);
+  gain.connect(ac.destination);
+  osc.start();
+  osc.stop(ac.currentTime + 0.14);
+}
+
+// ── Zap (badass/freak kill) ──────────────────────────────────────────────────
+// Sawtooth sweeping rapidly down from high freq, with a bit of noise crunch
+function playPing() {
+  const ac  = getAudio();
+  const now = ac.currentTime;
+
+  // Main zap: sawtooth sweeping 3000 -> 200 Hz
+  const osc  = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(3000, now);
+  osc.frequency.exponentialRampToValueAtTime(200, now + 0.25);
+  gain.gain.setValueAtTime(0.4, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+  osc.connect(gain);
+  gain.connect(ac.destination);
+  osc.start(now);
+  osc.stop(now + 0.29);
+
+  // Noise burst underneath for crunch at the attack
+  const bufSize = ac.sampleRate * 0.08;
+  const buf = ac.createBuffer(1, bufSize, ac.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+  const noise = ac.createBufferSource();
+  noise.buffer = buf;
+  const nGain = ac.createGain();
+  nGain.gain.setValueAtTime(0.3, now);
+  nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+  noise.connect(nGain);
+  nGain.connect(ac.destination);
+  noise.start(now);
+}
+
+// ── Background pulse ──────────────────────────────────────────────────────────
+// Four-note motif: middle, upper, middle, lower — fixed frequencies forever.
+// Only the interval between notes (and note duration) changes with time.
+// Frequencies: D3=147, A3=220, D3=147, G2=98
+const PULSE_NOTES = [87, 92, 87, 73];
+let pulseTimeout = null;
+let pulseNoteIdx = 0;
+let pulseRunning = false;
+
+function playPulseNote() {
+  if (!pulseRunning) return;
+  const ac = getAudio();
+
+  const freq = PULSE_NOTES[pulseNoteIdx % 4];
+  pulseNoteIdx++;
+
+  // Interval shrinks as timer grows: starts at 900ms, floors at 180ms
+  const interval = Math.max(180, 900 - timer * 40);
+  // Note duration tracks interval so notes don't hang over each other
+  const noteDur = Math.max(0.06, interval / 1000 * 0.55);
+
+  const osc  = ac.createOscillator();
+  const gain = ac.createGain();
+
+  osc.type = 'sine';
+  osc.frequency.value = freq;
+
+  gain.gain.setValueAtTime(0, ac.currentTime);
+  gain.gain.linearRampToValueAtTime(0.22, ac.currentTime + 0.03);
+  gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + noteDur);
+
+  osc.connect(gain);
+  gain.connect(ac.destination);
+  osc.start();
+  osc.stop(ac.currentTime + noteDur + 0.02);
+
+  pulseTimeout = setTimeout(playPulseNote, interval);
+}
+function startPulse() {
+  if (pulseRunning) return;
+  pulseRunning = true;
+  pulseNoteIdx = 0;
+  const ac = getAudio();
+  // Browsers suspend AudioContext until a user gesture — resume before playing
+  if (ac.state === 'suspended') {
+    ac.resume().then(playPulseNote);
+  } else {
+    playPulseNote();
+  }
+}
+
+function stopPulse() {
+  pulseRunning = false;
+  if (pulseTimeout) { clearTimeout(pulseTimeout); pulseTimeout = null; }
+}
+
+// ── Triumphant Game Over fanfare ─────────────────────────────────────────────
+// A bold brass-style fanfare in three parts:
+//  1. Rising fifth stab: C4 → G4 (punchy, attention-grabbing)
+//  2. Full major chord bloom: C4+E4+G4+C5 together, swelling
+//  3. Descending resolution: G4 → E4 → C4, broad and final
+function playGameOver() {
+  stopPulse();
+  stopThrust();
+  stopAllSirens();
+  const ac  = getAudio();
+  const now = ac.currentTime;
+
+  // ── Thus Spake Zarathustra — Sunrise opening (Strauss) ───────────────────
+  // The famous three-note motif: C2 → G2 → C3, then the big chord crash.
+  // C2=65.4  G2=98  C3=130.8  E3=164.8  G3=196  C4=261.6
+
+  function brass(freq, startT, dur, peak=0.22) {
+    const o1 = ac.createOscillator(), o2 = ac.createOscillator();
+    const g  = ac.createGain();
+    o1.type = 'sawtooth'; o1.frequency.value = freq;
+    o2.type = 'sawtooth'; o2.frequency.value = freq * 1.004;
+    g.gain.setValueAtTime(0, startT);
+    g.gain.linearRampToValueAtTime(peak, startT + 0.08);
+    g.gain.setValueAtTime(peak, startT + dur - 0.25);
+    g.gain.exponentialRampToValueAtTime(0.001, startT + dur);
+    o1.connect(g); o2.connect(g); g.connect(ac.destination);
+    o1.start(startT); o1.stop(startT + dur + 0.02);
+    o2.start(startT); o2.stop(startT + dur + 0.02);
+  }
+
+  function pedal(freq, startT, dur, peak=0.15) {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'sine'; o.frequency.value = freq;
+    g.gain.setValueAtTime(0, startT);
+    g.gain.linearRampToValueAtTime(peak, startT + 0.3);
+    g.gain.setValueAtTime(peak, startT + dur - 0.5);
+    g.gain.exponentialRampToValueAtTime(0.001, startT + dur);
+    o.connect(g); g.connect(ac.destination);
+    o.start(startT); o.stop(startT + dur + 0.02);
+  }
+
+  function timp(startT) {
+    const bufSize = Math.floor(ac.sampleRate * 1.0);
+    const buf  = ac.createBuffer(1, bufSize, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++)
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufSize, 2.5);
+    const src = ac.createBufferSource();
+    src.buffer = buf;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.5, startT);
+    g.gain.exponentialRampToValueAtTime(0.001, startT + 1.0);
+    src.connect(g); g.connect(ac.destination);
+    src.start(startT);
+  }
+
+  // ── Low C pedal drone throughout ─────────────────────────────────────────
+  pedal(32.7, now, 14.0, 0.15);    // C1 organ pedal
+
+  // ── Three rising notes: C2 → G2 → C3 ────────────────────────────────────
+  timp(now + 0.0);
+  brass(65.4,  now + 0.0, 2.2, 0.14);   // C2 — distant, quiet
+  brass(130.8, now + 0.0, 2.2, 0.08);   // C3 octave (soft)
+
+  timp(now + 2.5);
+  brass(98.0,  now + 2.5, 2.2, 0.18);   // G2
+  brass(196.0, now + 2.5, 2.2, 0.10);   // G3 octave
+
+  timp(now + 5.2);
+  brass(130.8, now + 5.2, 2.8, 0.24);   // C3 — stronger
+  brass(261.6, now + 5.2, 2.8, 0.14);   // C4 octave
+
+  // ── Big chord crash ───────────────────────────────────────────────────────
+  const crash = now + 8.5;
+  timp(crash);
+  pedal(65.4,  crash, 5.0, 0.22);       // C2 pedal swell
+  brass(65.4,  crash, 4.5, 0.26);       // C2
+  brass(98.0,  crash, 4.5, 0.22);       // G2
+  brass(130.8, crash, 4.5, 0.26);       // C3
+  brass(164.8, crash, 4.5, 0.20);       // E3
+  brass(196.0, crash, 4.5, 0.22);       // G3
+  brass(261.6, crash, 4.5, 0.18);       // C4
+
+  // ── Glow animation synced to music (~13s total) ───────────────────────────
+  const el = document.getElementById('gameover-text');
+  el.style.color = '#000';
+  el.style.textShadow = 'none';
+  const startMs = performance.now();
+  const totalMs = 13000;
+
+  function animateGlow() {
+    const el2 = document.getElementById('gameover-text');
+    if (!el2 || gameState !== 'gameover') return;
+    const t = Math.min((performance.now() - startMs) / totalMs, 1.0);
+    let r, g, b, g1, g2, g3;
+    if (t < 0.4) {
+      const p = t / 0.4;
+      r = Math.round(p * 160); g = 0; b = 0;
+      g1 = Math.round(p * 15); g2 = Math.round(p * 30); g3 = 0;
+    } else if (t < 0.65) {
+      const p = (t - 0.4) / 0.25;
+      r = Math.round(160 + p * 95); g = 0; b = 0;
+      g1 = Math.round(15 + p * 25); g2 = Math.round(30 + p * 60); g3 = Math.round(p * 40);
+    } else {
+      const p = (t - 0.65) / 0.35;
+      r = 255; g = Math.round(p * 60); b = 0;
+      g1 = Math.round(40 + p * 30); g2 = Math.round(90 + p * 60); g3 = Math.round(40 + p * 80);
+    }
+    const col = `rgb(${r},${g},${b})`;
+    el2.style.color = col;
+    el2.style.textShadow = [
+      `0 0 ${g1}px rgb(${r},${g},${b})`,
+      `0 0 ${g2}px #ff2200`,
+      `0 0 ${g3}px #ff6600`,
+    ].join(', ');
+    if (t < 1.0) requestAnimationFrame(animateGlow);
+  }
+  requestAnimationFrame(animateGlow);
+}
+
+// ── Victory flourish ─────────────────────────────────────────────────────────
+// ♩=98. Pattern x3: F#5 G5 F#5 G5 (quarters), A5 (half), D5 (full)
+// 4th run: same but final note is sustained E5 instead of D5.
+// F#5=739.99  G5=783.99  A5=880  D5=587.33  E5=659.25
+function playVictory() {
+  stopPulse();
+  stopThrust();
+  stopAllSirens();
+  const ac  = getAudio();
+  const now = ac.currentTime;
+  const BPM = 600;
+  const q = 60 / BPM;        // quarter note
+  const h = q * 2;           // half note
+  const w = q * 4;           // whole note
+
+  const Fs5=739.99, G5=783.99, A5=880, D5=587.33, E5=659.25;
+
+  // One phrase: [freq, duration, offset from phrase start]
+  // Phrases 1-3: F#5 G5 F#5 G5 A5 D5
+  // Phrase 4:     F#5 G5 F#5 G5 E5  (no A5, jumps straight to final note)
+  function phrase(finalNote, startT, skipA5=false) {
+    const notes = [
+      [Fs5, q, startT + 0  ],
+      [G5,  q, startT + q  ],
+      [Fs5, q, startT + 2*q],
+      [G5,  q, startT + 3*q],
+    ];
+    if (!skipA5) notes.push([A5, h, startT + 4*q]);
+    const finalOffset = skipA5 ? 4*q : 6*q;
+    notes.push([finalNote, w, startT + finalOffset]);
+    return notes;
+  }
+
+  const phraseDur    = 6*q + w;        // phrases 1-3: 10 beats
+  const phraseDur4   = 4*q + w;        // phrase 4 shorter (no A5 half note)
+  const seq = [
+    ...phrase(D5, now + 0*phraseDur),
+    ...phrase(D5, now + 1*phraseDur),
+    ...phrase(D5, now + 2*phraseDur),
+    ...phrase(E5, now + 3*phraseDur, true),  // 4th: no A5, end on E5
+  ];
+
+  function brass(freq, startT, duration) {
+    const osc1 = ac.createOscillator();
+    const osc2 = ac.createOscillator();
+    const gain = ac.createGain();
+    osc1.type = 'sawtooth'; osc1.frequency.value = freq;
+    osc2.type = 'sawtooth'; osc2.frequency.value = freq * 1.005;
+    gain.gain.setValueAtTime(0, startT);
+    gain.gain.linearRampToValueAtTime(0.26, startT + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.001, startT + duration * 0.92);
+    osc1.connect(gain); osc2.connect(gain);
+    gain.connect(ac.destination);
+    osc1.start(startT); osc1.stop(startT + duration);
+    osc2.start(startT); osc2.stop(startT + duration);
+  }
+
+  seq.forEach(([freq, dur, t]) => brass(freq, t, dur));
+}
+
+// ── Death sound ───────────────────────────────────────────────────────────────
+function playDeath() {
+  stopPulse();
+  stopThrust();
+  stopAllSirens();
+  const ac = getAudio();
+
+  // Descending noise burst with distortion feel
+  const osc = ac.createOscillator();
+  const osc2 = ac.createOscillator();
+  const gain = ac.createGain();
+  const gain2 = ac.createGain();
+
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(440, ac.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(40, ac.currentTime + 0.8);
+
+  osc2.type = 'square';
+  osc2.frequency.setValueAtTime(220, ac.currentTime);
+  osc2.frequency.exponentialRampToValueAtTime(30, ac.currentTime + 0.9);
+
+  gain.gain.setValueAtTime(0.3, ac.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.85);
+
+  gain2.gain.setValueAtTime(0.2, ac.currentTime);
+  gain2.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.95);
+
+  osc.connect(gain);   gain.connect(ac.destination);
+  osc2.connect(gain2); gain2.connect(ac.destination);
+  osc.start();  osc.stop(ac.currentTime + 0.9);
+  osc2.start(); osc2.stop(ac.currentTime + 1.0);
+}
+
+
+// ── Freak sirens ──────────────────────────────────────────────────────────────
+// One looping siren node per active freak, keyed by drone array index.
+// The siren is a sine oscillator whose pitch sweeps up and down via an LFO.
+const sirenNodes = {}; // index -> { osc, lfo, gain }
+
+function startSiren(idx) {
+  if (sirenNodes[idx]) return;
+  const ac = getAudio();
+
+  const gain = ac.createGain();
+  gain.gain.value = 0.13;
+
+  // Carrier: sits at 480 Hz (a menacing mid pitch)
+  const osc = ac.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.value = 480;
+
+  // LFO sweeps the pitch ±80 Hz at 2.8 Hz — classic two-tone siren
+  const lfo     = ac.createOscillator();
+  const lfoGain = ac.createGain();
+  lfo.type = 'sine';
+  lfo.frequency.value = 2.8;
+  lfoGain.gain.value = 80;
+
+  lfo.connect(lfoGain);
+  lfoGain.connect(osc.frequency);
+  osc.connect(gain);
+  gain.connect(ac.destination);
+
+  osc.start(); lfo.start();
+  sirenNodes[idx] = { osc, lfo, gain };
+}
+
+function stopSiren(idx) {
+  const node = sirenNodes[idx];
+  if (!node) return;
+  node.gain.gain.setTargetAtTime(0, getAudio().currentTime, 0.05);
+  const { osc, lfo } = node;
+  setTimeout(() => {
+    try { osc.stop(); } catch(e) {}
+    try { lfo.stop(); } catch(e) {}
+  }, 200);
+  delete sirenNodes[idx];
+}
+
+function stopAllSirens() {
+  Object.keys(sirenNodes).forEach(idx => stopSiren(Number(idx)));
+}
+
 // ─── INPUT ────────────────────────────────────────────────────────────────────
 const keys = {};
 window.addEventListener('keydown', e => {
@@ -498,6 +912,7 @@ function getZone(px, py) {
 let frame, score, lives, level, dir, numDrones, numFreaks, freakTime, drSpeed;
 let freeLifeIdx = 0;
 let gameRunning = false;
+let levelClearSounded = false;
 let paused = false;
 let gameState = 'menu'; // 'menu','game','scores','help','initials','gameover'
 
@@ -552,6 +967,8 @@ class Bullet {
       if (d.alive && this.x >= d.x && this.x <= d.x+20 && this.y >= d.y && this.y <= d.y+20) {
         this.alive = false;
         if (d.typ > 0) createBadass(d.speed, d.ftime, d.rank);
+        stopSiren(drones.indexOf(d));
+        if (d.typ >= 1) playPing();
         d.alive = false; d.explode = 9; d.bl.alive = false;
         numDrones--;
         score += d.typ === 0 ? 1000 : d.typ === 1 ? 1500 : 2500;
@@ -590,6 +1007,7 @@ class DroneBullet {
     if (this.x>=ship.x && this.x<=ship.x+20 && this.y>=ship.y && this.y<=ship.y+20) {
       this.alive=false;
       ship.alive=false; ship.explode=9; lives--;
+      playDeath(); stopThrust();
     }
   }
   draw() {
@@ -676,7 +1094,10 @@ class Drone {
 
     if (this.typ === 1) {
       this.fire();
-      if (timer >= this.ftime) this.typ = 2;
+      if (timer >= this.ftime) {
+        this.typ = 2;
+        startSiren(drones.indexOf(this));
+      }
     }
 
     if (this.typ === 2) {
@@ -823,6 +1244,7 @@ class Ship {
         b.vx = 10*Math.cos(this.angle);
         b.vy = 10*Math.sin(this.angle);
         b.xo=b.x; b.yo=b.y;
+        playPew();
         break;
       }
     }
@@ -867,6 +1289,7 @@ class Ship {
     if (keys['ArrowLeft'])  this.angle -= 0.1;
     if (keys['ArrowRight']) this.angle += 0.1;
 
+    const wasJetsOn = this.jetsOn;
     if (keys['ArrowUp']) {
       this.jetsOn=true;
       this.xacc = ACCFACT * Math.cos(this.angle);
@@ -875,6 +1298,8 @@ class Ship {
     } else {
       this.jetsOn=false;
     }
+    if (this.jetsOn && !wasJetsOn) startThrust();
+    else if (!this.jetsOn && wasJetsOn) stopThrust();
 
     const decay = this.jetsOn ? DECAY_ON : DECAY_OFF;
     this.vx -= this.vx * decay;
@@ -895,6 +1320,8 @@ class Ship {
           ((this.y>=d.y&&this.y<=d.y+20)||(this.y+20>=d.y&&this.y+20<=d.y+20))) {
         this.alive=false; d.alive=false; numDrones--;
         this.explode=9; d.explode=9; lives--;
+        stopSiren(drones.indexOf(d));
+        playDeath(); stopThrust();
         return;
       }
     }
@@ -904,6 +1331,7 @@ class Ship {
           ((this.y>=m.y&&this.y<=m.y+20)||(this.y+20>=m.y&&this.y+20<=m.y+20))) {
         this.alive=false; m.alive=false;
         this.explode=9; lives--;
+        playDeath(); stopThrust();
         return;
       }
     }
@@ -995,12 +1423,15 @@ function drawArena() {
 function drawHUD() {
   ctx.font = '14px "Share Tech Mono"';
   ctx.fillStyle = '#00cc44';
-  ctx.fillText(`SCORE: ${score}   LIVES: ${lives}   LEVEL: ${level}`, 138, 178);
+  ctx.textAlign = 'center';
+  // Inner box spans x=133..487, centre=310, y=162..178
+  ctx.fillText(`SCORE: ${score}   LIVES: ${lives}   LEVEL: ${level}`, 310, 175);
+  ctx.textAlign = 'left'; // restore default
 }
 
 // ─── LEVEL SETUP ──────────────────────────────────────────────────────────────
 function initLevel(now) {
-  frame = 0; timer3 = 0;
+  frame = 0; timer3 = 0; levelClearSounded = false; stopAllSirens();
   resetTimer(now ?? performance.now());
   if (ship.alive) level++;
 
@@ -1056,6 +1487,7 @@ function createBadass(speed, freaktime, rank) {
 
 function resetGame() {
   lives=4; score=0; level=1; freeLifeIdx=0;
+  stopAllSirens();
   for (let d of drones) { d.alive=false; d.explode=0; }
   for (let m of mines) m.alive=false;
   for (let b of ship.bl) b.reset();
@@ -1165,7 +1597,11 @@ let respawnTimer=0;
 
 function gameOverScreen() {
   gameState='gameover';
+  const goText = document.getElementById('gameover-text');
+  goText.style.color = '#000';
+  goText.style.textShadow = 'none';
   document.getElementById('gameover-screen').style.display='flex';
+  playGameOver();
   window.addEventListener('keydown', ()=>{
     document.getElementById('gameover-screen').style.display='none';
     doScores(()=>showMenu());
@@ -1189,6 +1625,7 @@ function startGame() {
   initLevel();
   levelFinish=timer;
   levelDone=false;
+  startPulse();
   requestAnimationFrame(gameLoop);
 }
 
@@ -1240,7 +1677,14 @@ function gameLoop(now) {
     }
 
     // Check level end condition
-    if (ship.alive && numDrLeft) levelFinish=timer;
+    if (ship.alive && numDrLeft) {
+      levelFinish=timer;
+      levelClearSounded = false;
+    }
+    if (ship.alive && !numDrLeft && !levelClearSounded) {
+      levelClearSounded = true;
+      playVictory();
+    }
 
     // Check pause
     if (keyPressed('KeyP')) {
@@ -1253,6 +1697,7 @@ function gameLoop(now) {
     }
 
     if (keyPressed('Escape')) {
+      stopPulse(); stopThrust(); stopAllSirens();
       gameState='menu';
       showMenu();
       return;
@@ -1266,6 +1711,8 @@ function gameLoop(now) {
       // Start next level
       initLevel(now);
       levelFinish=timer;
+      // Delay pulse so victory jingle finishes first (~4s)
+      setTimeout(startPulse, 4200);
     }
   }
 
