@@ -843,6 +843,23 @@ function stopAllSirens() {
   Object.keys(sirenNodes).forEach(idx => stopSiren(Number(idx)));
 }
 
+function stopAllSound() {
+  stopPulse();
+  stopThrust();
+  stopAllSirens();
+  // Close and discard the AudioContext entirely — this is the only reliable
+  // way to kill fire-and-forget oscillators (victory, game over) mid-flight.
+  // A fresh context is created next time getAudio() is called.
+  if (audioCtx) {
+    audioCtx.close();
+    audioCtx = null;
+  }
+}
+
+function resumeAllSound() {
+  // Nothing needed — getAudio() will create a fresh context on next sound.
+}
+
 // ─── INPUT ────────────────────────────────────────────────────────────────────
 const keys = {};
 window.addEventListener('keydown', e => {
@@ -1603,6 +1620,7 @@ function gameOverScreen() {
   document.getElementById('gameover-screen').style.display='flex';
   playGameOver();
   window.addEventListener('keydown', ()=>{
+    stopAllSound();
     document.getElementById('gameover-screen').style.display='none';
     doScores(()=>showMenu());
   }, {once:true});
@@ -1689,15 +1707,18 @@ function gameLoop(now) {
     // Check pause
     if (keyPressed('KeyP')) {
       paused=true;
+      stopAllSound();
       document.getElementById('pause-screen').style.display='flex';
       window.addEventListener('keydown',()=>{
         paused=false;
         document.getElementById('pause-screen').style.display='none';
+        resumeAllSound();
+        startPulse();
       },{once:true});
     }
 
     if (keyPressed('Escape')) {
-      stopPulse(); stopThrust(); stopAllSirens();
+      stopAllSound();
       gameState='menu';
       showMenu();
       return;
