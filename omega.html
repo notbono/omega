@@ -566,13 +566,9 @@ function startPulse() {
   if (pulseRunning) return;
   pulseRunning = true;
   pulseNoteIdx = 0;
-  const ac = getAudio();
-  // Browsers suspend AudioContext until a user gesture — resume before playing
-  if (ac.state === 'suspended') {
-    ac.resume().then(playPulseNote);
-  } else {
-    playPulseNote();
-  }
+  // Always resume the context before playing — handles both first-run
+  // browser autoplay policy and post-pause resume on any level.
+  getAudio().resume().then(playPulseNote);
 }
 
 function stopPulse() {
@@ -843,21 +839,25 @@ function stopAllSirens() {
   Object.keys(sirenNodes).forEach(idx => stopSiren(Number(idx)));
 }
 
+// Pause-safe stop: suspends audio so timers stop but context is reusable.
 function stopAllSound() {
   stopPulse();
   stopThrust();
   stopAllSirens();
-  // Close and discard the AudioContext entirely — this is the only reliable
-  // way to kill fire-and-forget oscillators (victory, game over) mid-flight.
-  // A fresh context is created next time getAudio() is called.
-  if (audioCtx) {
-    audioCtx.close();
-    audioCtx = null;
-  }
+  if (audioCtx) audioCtx.suspend();
 }
 
 function resumeAllSound() {
-  // Nothing needed — getAudio() will create a fresh context on next sound.
+  if (audioCtx) audioCtx.resume();
+}
+
+// Hard stop: closes context entirely, killing all fire-and-forget oscillators.
+// Use when leaving the game screen permanently (ESC, game over dismiss).
+function killAllSound() {
+  stopPulse();
+  stopThrust();
+  stopAllSirens();
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
 }
 
 // ─── INPUT ────────────────────────────────────────────────────────────────────
@@ -1620,7 +1620,7 @@ function gameOverScreen() {
   document.getElementById('gameover-screen').style.display='flex';
   playGameOver();
   window.addEventListener('keydown', ()=>{
-    stopAllSound();
+    killAllSound();
     document.getElementById('gameover-screen').style.display='none';
     doScores(()=>showMenu());
   }, {once:true});
@@ -1650,7 +1650,7 @@ function startGame() {
 function gameLoop(now) {
   if (gameState!=='game') return;
 
-  advanceTimers(now);
+  if (!paused) advanceTimers(now);
 
   if (timer3 > 0 && !paused) {
     timer3=0;
@@ -1709,16 +1709,19 @@ function gameLoop(now) {
       paused=true;
       stopAllSound();
       document.getElementById('pause-screen').style.display='flex';
-      window.addEventListener('keydown',()=>{
+      window.addEventListener('keydown', e=>{
+        if (e.target.classList.contains('initial-box')) return;
         paused=false;
         document.getElementById('pause-screen').style.display='none';
         resumeAllSound();
         startPulse();
+        // Re-anchor timer baselines so paused time doesn't cause a tick burst
+        _lastTimer=0; _lastTimer2=0; _lastTimer3=0;
       },{once:true});
     }
 
     if (keyPressed('Escape')) {
-      stopAllSound();
+      killAllSound();
       gameState='menu';
       showMenu();
       return;
